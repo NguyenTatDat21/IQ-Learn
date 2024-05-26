@@ -22,12 +22,17 @@ class SoftQ(object):
         self.critic_target_update_frequency = agent_cfg.critic_target_update_frequency
         self.log_alpha = torch.tensor(np.log(agent_cfg.init_temp)).to(self.device)
         self.q_net = hydra.utils.instantiate(
-            agent_cfg.critic_cfg, args=args, device=self.device).to(self.device)
-        self.target_net = hydra.utils.instantiate(agent_cfg.critic_cfg, args=args, device=self.device).to(
-            self.device)
+            agent_cfg.critic_cfg, args=args, device=self.device
+        ).to(self.device)
+        self.target_net = hydra.utils.instantiate(
+            agent_cfg.critic_cfg, args=args, device=self.device
+        ).to(self.device)
         self.target_net.load_state_dict(self.q_net.state_dict())
-        self.critic_optimizer = Adam(self.q_net.parameters(), lr=agent_cfg.critic_lr,
-                                     betas=agent_cfg.critic_betas)
+        self.critic_optimizer = Adam(
+            self.q_net.parameters(),
+            lr=agent_cfg.critic_lr,
+            betas=agent_cfg.critic_betas,
+        )
         self.train()
         self.target_net.train()
 
@@ -53,7 +58,7 @@ class SoftQ(object):
         state = torch.FloatTensor(state).to(self.device).unsqueeze(0)
         with torch.no_grad():
             q = self.q_net(state)
-            dist = F.softmax(q/self.alpha, dim=1)
+            dist = F.softmax(q / self.alpha, dim=1)
             # if sample:
             dist = Categorical(dist)
             action = dist.sample()  # if sample else dist.mean
@@ -64,8 +69,7 @@ class SoftQ(object):
 
     def getV(self, obs):
         q = self.q_net(obs)
-        v = self.alpha * \
-            torch.logsumexp(q/self.alpha, dim=1, keepdim=True)
+        v = self.alpha * torch.logsumexp(q / self.alpha, dim=1, keepdim=True)
         return v
 
     def critic(self, obs, action, both=False):
@@ -80,38 +84,35 @@ class SoftQ(object):
 
     def get_targetV(self, obs):
         q = self.target_net(obs)
-        target_v = self.alpha * \
-            torch.logsumexp(q/self.alpha, dim=1, keepdim=True)
+        target_v = self.alpha * torch.logsumexp(q / self.alpha, dim=1, keepdim=True)
         return target_v
 
     def update(self, replay_buffer, logger, step):
         obs, next_obs, action, reward, done = replay_buffer.get_samples(
-            self.batch_size, self.device)
+            self.batch_size, self.device
+        )
 
-        losses = self.update_critic(obs, action, reward, next_obs, done,
-                                    logger, step)
+        losses = self.update_critic(obs, action, reward, next_obs, done, logger, step)
 
         if step % self.critic_target_update_frequency == 0:
             self.target_net.load_state_dict(self.q_net.state_dict())
 
         return losses
 
-    def update_critic(self, obs, action, reward, next_obs, done, logger,
-                      step):
+    def update_critic(self, obs, action, reward, next_obs, done, logger, step):
 
         with torch.no_grad():
             next_v = self.get_targetV(next_obs)
             y = reward + (1 - done) * self.gamma * next_v
 
         critic_loss = F.mse_loss(self.critic(obs, action), y)
-        logger.log('train_critic/loss', critic_loss, step)
+        logger.log("train_critic/loss", critic_loss, step)
 
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
         self.critic_optimizer.step()
 
-        return {
-            'loss/critic': critic_loss.item()}
+        return {"loss/critic": critic_loss.item()}
 
     # Save model parameters
     def save(self, path, suffix=""):
@@ -121,8 +122,8 @@ class SoftQ(object):
 
     # Load model parameters
     def load(self, path, suffix=""):
-        critic_path = f'{path}/{self.args.agent.name}{suffix}'
-        print('Loading models from {}'.format(critic_path))
+        critic_path = f"{path}/{self.args.agent.name}{suffix}"
+        print("Loading models from {}".format(critic_path))
         self.q_net.load_state_dict(torch.load(critic_path, map_location=self.device))
 
     def infer_q(self, state, action):

@@ -24,7 +24,14 @@ from wrappers.atari_wrapper import LazyFrames
 from make_envs import make_env
 from dataset.memory import Memory
 from agent import make_agent
-from utils.utils import eval_mode, average_dicts, get_concat_samples, evaluate, soft_update, hard_update
+from utils.utils import (
+    eval_mode,
+    average_dicts,
+    get_concat_samples,
+    evaluate,
+    soft_update,
+    hard_update,
+)
 from utils.logger import Logger
 from iq import iq_loss
 
@@ -41,8 +48,13 @@ def get_args(cfg: DictConfig):
 @hydra.main(config_path="conf", config_name="config")
 def main(cfg: DictConfig):
     args = get_args(cfg)
-    wandb.init(project=args.project_name, entity='iq-learn',
-               sync_tensorboard=True, reinit=True, config=args)
+    wandb.init(
+        project=args.project_name,
+        entity="nguyentatdat21",
+        sync_tensorboard=True,
+        reinit=True,
+        config=OmegaConf.to_container(args, resolve=True),
+    )
 
     # set seeds
     random.seed(args.seed)
@@ -50,7 +62,7 @@ def main(cfg: DictConfig):
     torch.manual_seed(args.seed)
 
     device = torch.device(args.device)
-    if device.type == 'cuda' and torch.cuda.is_available() and args.cuda_deterministic:
+    if device.type == "cuda" and torch.cuda.is_available() and args.cuda_deterministic:
         torch.backends.cudnn.benchmark = False
         torch.backends.cudnn.deterministic = True
 
@@ -59,8 +71,10 @@ def main(cfg: DictConfig):
     eval_env = make_env(args)
 
     # Seed envs
-    env.seed(args.seed)
-    eval_env.seed(args.seed + 10)
+    # env.seed(args.seed)
+    env.reset(seed=args.seed)
+    # eval_env.seed(args.seed + 10)
+    eval_env.reset(seed=args.seed + 10)
 
     REPLAY_MEMORY = int(env_args.replay_mem)
     INITIAL_MEMORY = int(env_args.initial_mem)
@@ -80,25 +94,29 @@ def main(cfg: DictConfig):
             print("[Attention]: Did not find checkpoint {}".format(args.pretrain))
 
     # Load expert data
-    expert_memory_replay = Memory(REPLAY_MEMORY//2, args.seed)
-    expert_memory_replay.load(hydra.utils.to_absolute_path(f'experts/{args.env.demo}'),
-                              num_trajs=args.expert.demos,
-                              sample_freq=args.expert.subsample_freq,
-                              seed=args.seed + 42)
-    print(f'--> Expert memory size: {expert_memory_replay.size()}')
+    expert_memory_replay = Memory(REPLAY_MEMORY // 2, args.seed)
+    expert_memory_replay.load(
+        hydra.utils.to_absolute_path(f"experts/{args.env.demo}"),
+        num_trajs=args.expert.demos,
+        sample_freq=args.expert.subsample_freq,
+        seed=args.seed + 42,
+    )
+    print(f"--> Expert memory size: {expert_memory_replay.size()}")
 
-    online_memory_replay = Memory(REPLAY_MEMORY//2, args.seed+1)
+    online_memory_replay = Memory(REPLAY_MEMORY // 2, args.seed + 1)
 
     # Setup logging
     ts_str = datetime.datetime.fromtimestamp(time.time()).strftime("%Y-%m-%d_%H-%M-%S")
     log_dir = os.path.join(args.log_dir, args.env.name, args.exp_name, ts_str)
     writer = SummaryWriter(log_dir=log_dir)
-    print(f'--> Saving logs at: {log_dir}')
-    logger = Logger(args.log_dir,
-                    log_frequency=args.log_interval,
-                    writer=writer,
-                    save_tb=True,
-                    agent=args.agent.name)
+    print(f"--> Saving logs at: {log_dir}")
+    logger = Logger(
+        args.log_dir,
+        log_frequency=args.log_interval,
+        writer=writer,
+        save_tb=True,
+        agent=args.agent.name,
+    )
 
     steps = 0
 
@@ -113,12 +131,14 @@ def main(cfg: DictConfig):
 
     # Sample initial states from env
     state_0 = [env.reset()] * INITIAL_STATES
+    state_0 = [x[0] for x in state_0]
     if isinstance(state_0[0], LazyFrames):
         state_0 = np.array(state_0) / 255.0
     state_0 = torch.FloatTensor(np.array(state_0)).to(args.device)
 
     for epoch in count():
         state = env.reset()
+        state = state[0]
         episode_reward = 0
         done = False
 
@@ -131,40 +151,46 @@ def main(cfg: DictConfig):
             else:
                 with eval_mode(agent):
                     action = agent.choose_action(state, sample=True)
-            next_state, reward, done, _ = env.step(action)
+            next_state, reward, done, truncated, _ = env.step(action)
+            done = done or truncated
             episode_reward += reward
             steps += 1
 
             if learn_steps % args.env.eval_interval == 0:
-                eval_returns, eval_timesteps = evaluate(agent, eval_env, num_episodes=args.eval.eps)
+                eval_returns, eval_timesteps = evaluate(
+                    agent, eval_env, num_episodes=args.eval.eps
+                )
                 returns = np.mean(eval_returns)
                 learn_steps += 1  # To prevent repeated eval at timestep 0
-                logger.log('eval/episode_reward', returns, learn_steps)
-                logger.log('eval/episode', epoch, learn_steps)
-                logger.dump(learn_steps, ty='eval')
+                logger.log("eval/episode_reward", returns, learn_steps)
+                logger.log("eval/episode", epoch, learn_steps)
+                logger.dump(learn_steps, ty="eval")
                 # print('EVAL\tEp {}\tAverage reward: {:.2f}\t'.format(epoch, returns))
 
                 if returns > best_eval_returns:
                     # Store best eval returns
                     best_eval_returns = returns
                     wandb.run.summary["best_returns"] = best_eval_returns
-                    save(agent, epoch, args, output_dir='results_best')
+                    save(agent, epoch, args, output_dir="results_best")
 
             # only store done true when episode finishes without hitting timelimit (allow infinite bootstrap)
             done_no_lim = done
-            if str(env.__class__.__name__).find('TimeLimit') >= 0 and episode_step + 1 == env._max_episode_steps:
+            if (
+                str(env.__class__.__name__).find("TimeLimit") >= 0
+                and episode_step + 1 == env._max_episode_steps
+            ):
                 done_no_lim = 0
             online_memory_replay.add((state, next_state, action, reward, done_no_lim))
 
             if online_memory_replay.size() > INITIAL_MEMORY:
                 # Start learning
                 if begin_learn is False:
-                    print('Learn begins!')
+                    print("Learn begins!")
                     begin_learn = True
 
                 learn_steps += 1
                 if learn_steps == LEARN_STEPS:
-                    print('Finished!')
+                    print("Finished!")
                     wandb.finish()
                     return
 
@@ -172,8 +198,9 @@ def main(cfg: DictConfig):
                 # IQ-Learn Modification
                 agent.iq_update = types.MethodType(iq_update, agent)
                 agent.iq_update_critic = types.MethodType(iq_update_critic, agent)
-                losses = agent.iq_update(online_memory_replay,
-                                         expert_memory_replay, logger, learn_steps)
+                losses = agent.iq_update(
+                    online_memory_replay, expert_memory_replay, logger, learn_steps
+                )
                 ######
 
                 if learn_steps % args.log_interval == 0:
@@ -185,37 +212,48 @@ def main(cfg: DictConfig):
             state = next_state
 
         rewards_window.append(episode_reward)
-        logger.log('train/episode', epoch, learn_steps)
-        logger.log('train/episode_reward', episode_reward, learn_steps)
-        logger.log('train/duration', time.time() - start_time, learn_steps)
+        logger.log("train/episode", epoch, learn_steps)
+        logger.log("train/episode_reward", episode_reward, learn_steps)
+        logger.log("train/duration", time.time() - start_time, learn_steps)
         logger.dump(learn_steps, save=begin_learn)
         # print('TRAIN\tEp {}\tAverage reward: {:.2f}\t'.format(epoch, np.mean(rewards_window)))
-        save(agent, epoch, args, output_dir='results')
+        save(agent, epoch, args, output_dir="results")
 
 
-def save(agent, epoch, args, output_dir='results'):
+def save(agent, epoch, args, output_dir="results"):
     if epoch % args.save_interval == 0:
         if args.method.type == "sqil":
-            name = f'sqil_{args.env.name}'
+            name = f"sqil_{args.env.name}"
         else:
-            name = f'iq_{args.env.name}'
+            name = f"iq_{args.env.name}"
 
         if not os.path.exists(output_dir):
             os.mkdir(output_dir)
-        agent.save(f'{output_dir}/{args.agent.name}_{name}')
+        agent.save(f"{output_dir}/{args.agent.name}_{name}")
 
 
 # Minimal IQ-Learn objective
 def iq_learn_update(self, policy_batch, expert_batch, logger, step):
     args = self.args
-    policy_obs, policy_next_obs, policy_action, policy_reward, policy_done = policy_batch
-    expert_obs, expert_next_obs, expert_action, expert_reward, expert_done = expert_batch
+    policy_obs, policy_next_obs, policy_action, policy_reward, policy_done = (
+        policy_batch
+    )
+    expert_obs, expert_next_obs, expert_action, expert_reward, expert_done = (
+        expert_batch
+    )
 
     if args.only_expert_states:
-        expert_batch = expert_obs, expert_next_obs, policy_action, expert_reward, expert_done
+        expert_batch = (
+            expert_obs,
+            expert_next_obs,
+            policy_action,
+            expert_reward,
+            expert_done,
+        )
 
     obs, next_obs, action, reward, done, is_expert = get_concat_samples(
-        policy_batch, expert_batch, args)
+        policy_batch, expert_batch, args
+    )
 
     loss_dict = {}
 
@@ -236,7 +274,7 @@ def iq_learn_update(self, policy_batch, expert_batch, logger, step):
     loss += value_loss
 
     # Use χ2 divergence (adds a extra term to the loss)
-    chi2_loss = 1/(4 * args.method.alpha) * (reward**2).mean()
+    chi2_loss = 1 / (4 * args.method.alpha) * (reward**2).mean()
     loss += chi2_loss
     ######
 
@@ -248,12 +286,22 @@ def iq_learn_update(self, policy_batch, expert_batch, logger, step):
 
 def iq_update_critic(self, policy_batch, expert_batch, logger, step):
     args = self.args
-    policy_obs, policy_next_obs, policy_action, policy_reward, policy_done = policy_batch
-    expert_obs, expert_next_obs, expert_action, expert_reward, expert_done = expert_batch
+    policy_obs, policy_next_obs, policy_action, policy_reward, policy_done = (
+        policy_batch
+    )
+    expert_obs, expert_next_obs, expert_action, expert_reward, expert_done = (
+        expert_batch
+    )
 
     if args.only_expert_states:
         # Use policy actions instead of experts actions for IL with only observations
-        expert_batch = expert_obs, expert_next_obs, policy_action, expert_reward, expert_done
+        expert_batch = (
+            expert_obs,
+            expert_next_obs,
+            policy_action,
+            expert_reward,
+            expert_done,
+        )
 
     batch = get_concat_samples(policy_batch, expert_batch, args)
     obs, next_obs, action = batch[0:3]
@@ -270,14 +318,14 @@ def iq_update_critic(self, policy_batch, expert_batch, logger, step):
         current_Q1, current_Q2 = self.critic(obs, action, both=True)
         q1_loss, loss_dict1 = iq_loss(agent, current_Q1, current_V, next_V, batch)
         q2_loss, loss_dict2 = iq_loss(agent, current_Q2, current_V, next_V, batch)
-        critic_loss = 1/2 * (q1_loss + q2_loss)
+        critic_loss = 1 / 2 * (q1_loss + q2_loss)
         # merge loss dicts
         loss_dict = average_dicts(loss_dict1, loss_dict2)
     else:
         current_Q = self.critic(obs, action)
         critic_loss, loss_dict = iq_loss(agent, current_Q, current_V, next_V, batch)
 
-    logger.log('train/critic_loss', critic_loss, step)
+    logger.log("train/critic_loss", critic_loss, step)
 
     # Optimize the critic
     self.critic_optimizer.zero_grad()
@@ -310,8 +358,7 @@ def iq_update(self, policy_buffer, expert_buffer, logger, step):
 
     if step % self.critic_target_update_frequency == 0:
         if self.args.train.soft_update:
-            soft_update(self.critic_net, self.critic_target_net,
-                        self.critic_tau)
+            soft_update(self.critic_net, self.critic_target_net, self.critic_tau)
         else:
             hard_update(self.critic_net, self.critic_target_net)
     return losses

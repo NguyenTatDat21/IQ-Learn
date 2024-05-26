@@ -36,31 +36,34 @@ def evaluate(actor, env, num_episodes=10, vis=True):
 
     while len(total_returns) < num_episodes:
         state = env.reset()
+        state = state[0]
         done = False
 
         with eval_mode(actor):
             while not done:
                 action = actor.choose_action(state, sample=False)
-                next_state, reward, done, info = env.step(action)
+                next_state, reward, done, truncated, info = env.step(action)
+                next_state = next_state
                 state = next_state
+                done = done or truncated
 
-                if 'episode' in info.keys():
-                    total_returns.append(info['episode']['r'])
-                    total_timesteps.append(info['episode']['l'])
+                if "episode" in info.keys():
+                    total_returns.append(info["episode"]["r"])
+                    total_timesteps.append(info["episode"]["l"])
 
     return total_returns, total_timesteps
 
 
 def weighted_softmax(x, weights):
     x = x - torch.max(x, dim=0)[0]
-    return weights * torch.exp(x) / torch.sum(
-        weights * torch.exp(x), dim=0, keepdim=True)
+    return (
+        weights * torch.exp(x) / torch.sum(weights * torch.exp(x), dim=0, keepdim=True)
+    )
 
 
 def soft_update(net, target_net, tau):
     for param, target_param in zip(net.parameters(), target_net.parameters()):
-        target_param.data.copy_(tau * param.data +
-                                (1 - tau) * target_param.data)
+        target_param.data.copy_(tau * param.data + (1 - tau) * target_param.data)
 
 
 def hard_update(source, target):
@@ -72,20 +75,16 @@ def weight_init(m):
     """Custom weight init for Conv2D and Linear layers."""
     if isinstance(m, nn.Linear):
         nn.init.orthogonal_(m.weight.data)
-        if hasattr(m.bias, 'data'):
+        if hasattr(m.bias, "data"):
             m.bias.data.fill_(0.0)
 
 
 class MLP(nn.Module):
-    def __init__(self,
-                 input_dim,
-                 hidden_dim,
-                 output_dim,
-                 hidden_depth,
-                 output_mod=None):
+    def __init__(
+        self, input_dim, hidden_dim, output_dim, hidden_depth, output_mod=None
+    ):
         super().__init__()
-        self.trunk = mlp(input_dim, hidden_dim, output_dim, hidden_depth,
-                         output_mod)
+        self.trunk = mlp(input_dim, hidden_dim, output_dim, hidden_depth, output_mod)
         self.apply(weight_init)
 
     def forward(self, x):
@@ -107,9 +106,21 @@ def mlp(input_dim, hidden_dim, output_dim, hidden_depth, output_mod=None):
 
 
 def get_concat_samples(policy_batch, expert_batch, args):
-    online_batch_state, online_batch_next_state, online_batch_action, online_batch_reward, online_batch_done = policy_batch
+    (
+        online_batch_state,
+        online_batch_next_state,
+        online_batch_action,
+        online_batch_reward,
+        online_batch_done,
+    ) = policy_batch
 
-    expert_batch_state, expert_batch_next_state, expert_batch_action, expert_batch_reward, expert_batch_done = expert_batch
+    (
+        expert_batch_state,
+        expert_batch_next_state,
+        expert_batch_action,
+        expert_batch_reward,
+        expert_batch_done,
+    ) = expert_batch
 
     if args.method.type == "sqil":
         # convert policy reward to 0
@@ -119,14 +130,27 @@ def get_concat_samples(policy_batch, expert_batch, args):
 
     batch_state = torch.cat([online_batch_state, expert_batch_state], dim=0)
     batch_next_state = torch.cat(
-        [online_batch_next_state, expert_batch_next_state], dim=0)
+        [online_batch_next_state, expert_batch_next_state], dim=0
+    )
     batch_action = torch.cat([online_batch_action, expert_batch_action], dim=0)
     batch_reward = torch.cat([online_batch_reward, expert_batch_reward], dim=0)
     batch_done = torch.cat([online_batch_done, expert_batch_done], dim=0)
-    is_expert = torch.cat([torch.zeros_like(online_batch_reward, dtype=torch.bool),
-                           torch.ones_like(expert_batch_reward, dtype=torch.bool)], dim=0)
+    is_expert = torch.cat(
+        [
+            torch.zeros_like(online_batch_reward, dtype=torch.bool),
+            torch.ones_like(expert_batch_reward, dtype=torch.bool),
+        ],
+        dim=0,
+    )
 
-    return batch_state, batch_next_state, batch_action, batch_reward, batch_done, is_expert
+    return (
+        batch_state,
+        batch_next_state,
+        batch_action,
+        batch_reward,
+        batch_done,
+        is_expert,
+    )
 
 
 def save_state(tensor, path, num_states=5):
@@ -140,5 +164,7 @@ def save_state(tensor, path, num_states=5):
 
 
 def average_dicts(dict1, dict2):
-    return {key: 1/2 * (dict1.get(key, 0) + dict2.get(key, 0))
-                     for key in set(dict1) | set(dict2)}
+    return {
+        key: 1 / 2 * (dict1.get(key, 0) + dict2.get(key, 0))
+        for key in set(dict1) | set(dict2)
+    }
