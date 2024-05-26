@@ -1,4 +1,5 @@
 cython<3
+swig
 gym[box2d]
 hydra-core==1.0.6
 stable_baselines3
